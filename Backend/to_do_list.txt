@@ -1,0 +1,61 @@
+Tổng quan nhiệm vụ Backend
+- Nhận yêu cầu từ frontend (đăng ký, đăng nhập, billing)
+- Gọi Nextcloud API để tạo tài khoản / xác thực
+- Quản lý thông tin user, quota, và ghi log vào DB
+
+Mục tiêu
+- Tạo một API server riêng để:
+- Xử lý logic đăng ký / đăng nhập
+- Kết nối Nextcloud API để tạo tài khoản người dùng
+- Ghi log và thông tin billing
+- Tích hợp thanh toán (mock hoặc real)
+
+Kiến trúc
+- Ngôn ngữ sử dụng: Python Flask hoặc Node.js Express
+- CSDL: MariaDB
+- Triển khai: Dùng riêng container
+- Endpoint:
+	+ POST /register → đăng ký tài khoản Nextcloud
+	+ POST /login → xác thực và trả token
+	+ GET /usage → xem dung lượng dùng / quota
+	+ POST /payment → ghi nhận thanh toán (mock)
+
+STEP BY STEP
+1. Tạo EC2 (Ubuntu 24.04, t3.small/t3.micro, 20GB gp3, inbound 443), tạo thư mục 'backend' gồm:
+- app.py
+- config.py
+- requirements.txt
+- Dockerfile
+
+2. Tạo file config.py chứa thông tin truy cập Nextcloud và Database (đã gửi sẵn)
+*về sau kiếm cách che thông tin username và password lại (dùng .env, rồi load bằng python-dotenv)*
+
+3. Tạo file app.py dùng để định nghĩa route API
+- Tạo tài khoản Nextcloud (/register)
+- Đăng nhập (/login)
+- Xem quota (giới hạn số lượng yêu cầu API từ ứng dụng) (/usage)
+- Giả lập thanh toán (/payment)
+
+4. Tạo file requirements.txt - các thư viện cần thiết (copy đoạn dưới vào file txt)
+Flask==3.0.3
+requests==2.31.0
+mysql-connector-python==9.0.0
+
+5. Tạo file Dockerfile - đóng gói backend (copy đoạn dưới)
+# Sử dụng Python base image
+FROM python:3.10-slim
+
+WORKDIR /app
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+COPY . .
+
+EXPOSE 5000
+CMD ["python", "app.py"]
+
+6. Test chạy thử bằng Docker (run đoạn dưới) hoặc chạy local
+docker build -t backend .
+docker run -p 5000:5000 backend
+
+*Nếu trả "User created successfully!" là ok*
