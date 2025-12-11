@@ -1,7 +1,10 @@
+import io
 import xml.etree.ElementTree as ET
 from fastapi import FastAPI, UploadFile, File, Form
 from fastapi.responses import JSONResponse
 import requests
+from starlette.responses import PlainTextResponse, StreamingResponse
+
 from config import settings
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -120,7 +123,6 @@ def get_quota(username: str = Form(...), password: str = Form(...)):
 def get_dashboard(username: str = Form(...), password: str = Form(...)):
     auth = (username, password)
 
-    # 1) Lấy thông tin user
     user_url = f"{settings.NEXTCLOUD_URL}/ocs/v1.php/cloud/user"
     headers = {
         "OCS-APIRequest": "true",
@@ -135,7 +137,6 @@ def get_dashboard(username: str = Form(...), password: str = Form(...)):
     user_data = user_info.json()["ocs"]["data"]
     quota = user_data["quota"]
 
-    # 2) PROPFIND để đếm file
     dav_url = f"{settings.NEXTCLOUD_URL}/remote.php/dav/files/{username}/"
     dav_headers = {
         "Depth": "1",
@@ -157,7 +158,6 @@ def get_dashboard(username: str = Form(...), password: str = Form(...)):
         root = ET.fromstring(dav_response.text)
         file_count = len(root.findall("{DAV:}response")) - 1  # trừ folder root
 
-    # 3) Dashboard response
     return {
         "username": user_data["id"],
         "display_name": user_data["display-name"],
@@ -226,3 +226,77 @@ def list_files(username: str = Form(...), password: str = Form(...)):
         })
 
     return {"files": files}
+
+
+@app.get("/view-file")
+def view_file(
+        username: str = Form(...),
+        password: str = Form(...),
+        filepath: str = Form(...)
+):
+    auth = (username, password)
+
+    # Normalize input
+    # 1) Decode %20 -> space
+    filepath = requests.utils.unquote(filepath)
+
+    # 2) Remove any prefix before the user's actual file path
+    # Example: /remote.php/dav/files/test/Templates credits.md
+    prefix = f"/remote.php/dav/files/{username}/"
+
+    if filepath.startswith(prefix):
+        filepath = filepath[len(prefix):]
+
+    # 3) Remove extra "/"
+    filepath = filepath.lstrip("/")
+
+    # Build real WebDAV URL
+    url = f"{settings.NEXTCLOUD_URL}/remote.php/dav/files/{username}/{filepath}"
+
+    r = requests.get(url, auth=auth)
+
+    if r.status_code != 200:
+        return JSONResponse(status_code=400, content={"error": r.text})
+
+    return PlainTextResponse(content=r.text)
+
+
+@app.post("/download-file")
+def download_file(
+    username: str = Form(...),
+    password: str = Form(...),
+    filepath: str = Form(...)
+):
+    auth = (username, password)
+
+    # 1) Decode URL encoding (vd: %20 -> space)
+    filepath = requests.utils.unquote(filepath)
+
+    # 2) Prefix WebDAV đầy đủ nếu user gửi nguyên đường dẫn
+    webdav_prefix = f"/remote.php/dav/files/{username}/"
+    if filepath.startswith(webdav_prefix):
+        filepath = filepath[len(webdav_prefix):]
+
+    # 3) Xóa dấu "/" thừa
+    filepath = filepath.lstrip("/")
+
+    # 4) Build URL gửi tới Nextcloud
+    nc_url = f"{settings.NEXTCLOUD_URL}/remote.php/dav/files/{username}/{filepath}"
+
+    # 5) Gửi request dạng stream để không load toàn bộ file vào RAM
+    r = requests.get(nc_url, auth=auth, stream=True)
+
+    if r.status_code != 200:
+        return JSONResponse(status_code=400, content={"error": r.text})
+
+    # 6) Tách tên file
+    filename = filepath.split("/")[-1]
+
+    # 7) Trả về StreamingResponse để client tải file trực tiếp
+    return StreamingResponse(
+        r.iter_content(chunk_size=8192),   # stream từng phần
+        media_type="application/octet-stream",
+        headers={
+            "Content-Disposition": f"attachment; filename={filename}"
+        }
+    )
