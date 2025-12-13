@@ -300,3 +300,46 @@ def download_file(
             "Content-Disposition": f"attachment; filename={filename}"
         }
     )
+
+
+# -----------------------
+# DELETE FILE OR FOLDER
+# -----------------------
+@app.post("/delete")
+def delete_file_or_folder(
+    username: str = Form(...),
+    password: str = Form(...),
+    filepath: str = Form(...)
+):
+    auth = (username, password)
+
+    # 1) Decode URL encoding (%20 -> space)
+    filepath = requests.utils.unquote(filepath)
+
+    # 2) Nếu client gửi full path WebDAV thì cắt prefix
+    webdav_prefix = f"/remote.php/dav/files/{username}/"
+    if filepath.startswith(webdav_prefix):
+        filepath = filepath[len(webdav_prefix):]
+
+    # 3) Bỏ dấu "/" dư
+    filepath = filepath.lstrip("/")
+
+    # 4) Build URL WebDAV
+    url = f"{settings.NEXTCLOUD_URL}/remote.php/dav/files/{username}/{filepath}"
+
+    # 5) Gửi DELETE request
+    r = requests.delete(url, auth=auth)
+
+    if r.status_code in [200, 204]:
+        return {
+            "status": "success",
+            "message": f"Deleted successfully: {filepath}"
+        }
+
+    return JSONResponse(
+        status_code=400,
+        content={
+            "status": "error",
+            "message": r.text
+        }
+    )
