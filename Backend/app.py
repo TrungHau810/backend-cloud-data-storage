@@ -1,12 +1,22 @@
+import datetime
 import io
+import json
+import string
+import time
+import urllib
 import xml.etree.ElementTree as ET
-from fastapi import FastAPI, UploadFile, File, Form
+import random
+
+from fastapi import FastAPI, UploadFile, File, Form, Request, HTTPException
 from fastapi.responses import JSONResponse
 import requests
 from starlette.responses import PlainTextResponse, StreamingResponse
 
 from config import settings
 from fastapi.middleware.cors import CORSMiddleware
+
+from momo import create_momo_signature
+from vnpay import create_vnpay_signature
 
 app = FastAPI()
 
@@ -17,6 +27,9 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+with open("plans.json", "r", encoding="utf-8") as f:
+    PLANS = json.load(f)["plans"]
 
 
 @app.get("/")
@@ -263,9 +276,9 @@ def view_file(
 
 @app.post("/download-file")
 def download_file(
-    username: str = Form(...),
-    password: str = Form(...),
-    filepath: str = Form(...)
+        username: str = Form(...),
+        password: str = Form(...),
+        filepath: str = Form(...)
 ):
     auth = (username, password)
 
@@ -294,7 +307,7 @@ def download_file(
 
     # 7) Trả về StreamingResponse để client tải file trực tiếp
     return StreamingResponse(
-        r.iter_content(chunk_size=8192),   # stream từng phần
+        r.iter_content(chunk_size=8192),  # stream từng phần
         media_type="application/octet-stream",
         headers={
             "Content-Disposition": f"attachment; filename={filename}"
@@ -307,9 +320,9 @@ def download_file(
 # -----------------------
 @app.post("/delete")
 def delete_file_or_folder(
-    username: str = Form(...),
-    password: str = Form(...),
-    filepath: str = Form(...)
+        username: str = Form(...),
+        password: str = Form(...),
+        filepath: str = Form(...)
 ):
     auth = (username, password)
 
@@ -343,3 +356,152 @@ def delete_file_or_folder(
             "message": r.text
         }
     )
+
+
+@app.post("/payment/vnpay/create")
+def create_vnpay_payment(
+        request: Request,
+        username: str = Form(...),
+        plan: str = Form(...)
+):
+    if plan not in PLANS:
+        return JSONResponse(status_code=400, content={"error": "Invalid plan"})
+
+    # Tạo order_id
+    order_id = "".join(random.choices(string.digits, k=10))
+
+    # Thời gian hiện tại
+    now = datetime.datetime.now()
+    create_date = now.strftime("%Y%m%d%H%M%S")
+    expire_date = (now + datetime.timedelta(minutes=15)).strftime("%Y%m%d%H%M%S")
+
+    # Số tiền (VNPay yêu cầu nhân 100)
+    amount = int(PLANS[plan]["amount"] * 100)
+
+    vnp_params = {
+        "vnp_Version": "2.1.0",
+        "vnp_Command": "pay",
+        "vnp_TmnCode": settings.VNPAY_TMNCODE,
+        "vnp_Amount": amount,
+        "vnp_CurrCode": "VND",
+        "vnp_TxnRef": f"{order_id}-{int(now.timestamp())}",  # order_id + timestamp
+        "vnp_OrderInfo": f"Thanh toan goi {plan} cho nguoi dung {username}",
+        "vnp_OrderType": "other",
+        "vnp_Locale": "vn",
+        "vnp_ReturnUrl": settings.VNPAY_RETURN_URL,
+        "vnp_IpAddr": request.client.host if request.client else "127.0.0.1",
+        "vnp_CreateDate": create_date,
+        "vnp_ExpireDate": expire_date,
+    }
+
+    # Tạo chữ ký bảo mật
+    secure_hash = create_vnpay_signature(vnp_params)
+    vnp_params["vnp_SecureHash"] = secure_hash
+
+    # Tạo URL thanh toán
+    payment_url = (
+            settings.VNPAY_PAYMENT_URL
+            + "?"
+            + urllib.parse.urlencode(vnp_params)
+    )
+
+    return {
+        "payment_url": payment_url,
+        "order_id": order_id
+    }
+
+
+@app.post("/payment/momo/create")
+def create_momo_payment(
+        username: str = Form(...),
+        plan: str = Form(...)
+):
+    if plan not in PLANS:
+        raise HTTPException(status_code=400, detail="Invalid plan")
+
+    order_id = f"MOMO{int(time.time())}"
+    request_id = order_id
+    amount = str(PLANS[plan]["amount"])
+
+    order_info = f"Thanh toan goi {plan} cho nguoi dung {username}"
+    extra_data = ""
+
+    raw_signature = (
+        f"accessKey={settings.MOMO_ACCESS_KEY}"
+        f"&amount={amount}"
+        f"&extraData={extra_data}"
+        f"&ipnUrl={settings.MOMO_RETURN_URL}"
+        f"&orderId={order_id}"
+        f"&orderInfo={order_info}"
+        f"&partnerCode={settings.PARTNER_CODE}"
+        f"&redirectUrl={settings.MOMO_RETURN_URL}"
+        f"&requestId={request_id}"
+        f"&requestType=captureWallet"
+    )
+
+    signature = create_momo_signature(
+        raw_signature,
+        settings.MOMO_SECRET_KEY
+    )
+
+    payload = {
+        "partnerCode": settings.PARTNER_CODE,
+        "accessKey": settings.MOMO_ACCESS_KEY,
+        "requestId": request_id,
+        "amount": amount,
+        "orderId": order_id,
+        "orderInfo": order_info,
+        "redirectUrl": settings.MOMO_RETURN_URL,
+        "ipnUrl": settings.MOMO_RETURN_URL,
+        "extraData": extra_data,
+        "requestType": "captureWallet",
+        "signature": signature,
+        "lang": "vi"
+    }
+
+    response = requests.post(settings.ENDPOINT, json=payload, timeout=10)
+    result = response.json()
+
+    if result.get("resultCode") != 0:
+        return JSONResponse(status_code=400, content=result)
+
+    return {
+        "payUrl": result["payUrl"],
+        "orderId": order_id
+    }
+
+
+@app.post("/payment/notify")
+async def momo_notify(request: Request):
+    data = await request.json()
+
+    raw_signature = (
+        f"accessKey={data['accessKey']}"
+        f"&amount={data['amount']}"
+        f"&extraData={data['extraData']}"
+        f"&message={data['message']}"
+        f"&orderId={data['orderId']}"
+        f"&orderInfo={data['orderInfo']}"
+        f"&orderType={data['orderType']}"
+        f"&partnerCode={data['partnerCode']}"
+        f"&payType={data['payType']}"
+        f"&requestId={data['requestId']}"
+        f"&responseTime={data['responseTime']}"
+        f"&resultCode={data['resultCode']}"
+        f"&transId={data['transId']}"
+    )
+
+    signature = hmac.new(
+        SECRET_KEY.encode(),
+        raw_signature.encode(),
+        hashlib.sha256
+    ).hexdigest()
+
+    if signature != data["signature"]:
+        return {"status": "invalid signature"}
+
+    if data["resultCode"] == 0:
+        # TODO: nâng dung lượng Nextcloud
+        pass
+
+    return {"status": "ok"}
