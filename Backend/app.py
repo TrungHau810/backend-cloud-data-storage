@@ -1,4 +1,6 @@
 import datetime
+import hashlib
+import hmac
 import io
 import json
 import string
@@ -426,6 +428,8 @@ def create_momo_payment(
     order_info = f"Thanh toan goi {plan} cho nguoi dung {username}"
     extra_data = ""
 
+    print("DEBUG URL:", settings.MOMO_RETURN_URL)
+
     raw_signature = (
         f"accessKey={settings.MOMO_ACCESS_KEY}"
         f"&amount={amount}"
@@ -492,7 +496,7 @@ async def momo_notify(request: Request):
     )
 
     signature = hmac.new(
-        SECRET_KEY.encode(),
+        settings.MOMO_SECRET_KEY.encode(),
         raw_signature.encode(),
         hashlib.sha256
     ).hexdigest()
@@ -505,3 +509,66 @@ async def momo_notify(request: Request):
         pass
 
     return {"status": "ok"}
+
+# ĐANG TEST
+# Hàm phụ trợ: Nâng cấp dung lượng trên Nextcloud
+def update_nextcloud_quota(username: str, plan_name: str):
+    if plan_name not in PLANS:
+        return False
+
+    # Lấy quota từ file plans.json (ví dụ: "10GB")
+    new_quota = PLANS[plan_name]["quota"]
+
+    url = f"{settings.NEXTCLOUD_URL}/ocs/v1.php/cloud/users/{username}"
+    headers = {
+        "OCS-APIRequest": "true"
+    }
+    # API Nextcloud yêu cầu method PUT để sửa user
+    payload = {
+        "key": "quota",
+        "value": new_quota
+    }
+    auth = (settings.NC_USERNAME, settings.NC_PASSWORD)
+
+    try:
+        r = requests.put(url, auth=auth, headers=headers, data=payload)
+        if r.status_code == 200:
+            return True
+        print(f"Lỗi Nextcloud: {r.text}")  # Debug
+        return False
+    except Exception as e:
+        print(f"Lỗi kết nối: {e}")
+        return False
+
+
+# API MỚI: Dùng cho Frontend gọi xuống khi Redirect về
+@app.post("/payment/verify")
+def verify_payment_local(
+        orderId: str = Form(...),
+        requestId: str = Form(...),
+        resultCode: int = Form(...)
+):
+    # 1. Kiểm tra trạng thái từ MoMo
+    if resultCode != 0:
+        return JSONResponse(status_code=400, content={"message": "Thanh toán thất bại hoặc bị hủy"})
+
+    # 2. Phân tích OrderInfo để lấy Username và Gói (Hack nhẹ cho demo)
+    # Lúc tạo payment ta đặt: orderInfo = f"Thanh toan goi {plan} cho nguoi dung {username}"
+    # Trong thực tế nên lưu transaction vào Database để tra cứu lại.
+    # Ở đây mình sẽ giả định là Frontend gửi kèm username và plan để test nhanh.
+
+    return {"status": "success", "message": "Vui lòng gọi API /upgrade để thực hiện nâng cấp"}
+
+
+@app.post("/upgrade-account")
+def upgrade_account(
+        username: str = Form(...),
+        plan: str = Form(...)
+):
+    # Gọi hàm nâng cấp Nextcloud
+    success = update_nextcloud_quota(username, plan)
+
+    if success:
+        return {"status": "success", "message": f"Đã nâng cấp lên gói {plan} cho {username}"}
+    else:
+        return JSONResponse(status_code=500, content={"message": "Lỗi khi cập nhật Nextcloud"})
