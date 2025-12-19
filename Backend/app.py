@@ -510,7 +510,7 @@ async def momo_notify(request: Request):
 
     return {"status": "ok"}
 
-# ĐANG TEST
+
 # Hàm phụ trợ: Nâng cấp dung lượng trên Nextcloud
 def update_nextcloud_quota(username: str, plan_name: str):
     if plan_name not in PLANS:
