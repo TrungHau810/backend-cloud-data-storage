@@ -38,6 +38,8 @@ app.include_router(user.router, prefix="/auth", tags=["auth"])
 with open("plans.json", "r", encoding="utf-8") as f:
     PLANS = json.load(f)["plans"]
 
+Payment_file = "payments.json"
+
 
 @app.get("/")
 def home():
@@ -559,71 +561,71 @@ def upgrade_account(
 payment_lock = Lock()
 
 
-def is_paid(app_trans_id: str) -> bool:
+def load_payments():
+    if not os.path.exists(Payment_file):
+        return {}
+
+    try:
+        with open(Payment_file, "r", encoding="utf-8") as f:
+            content = f.read().strip()
+            if not content:
+                return {}
+            return json.loads(content)
+    except json.JSONDecodeError:
+        return {}
+
+
+def save_payments(data):
+    with open(Payment_file, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+
+
+def create_pending_payment(app_trans_id, username, plan, amount):
     with payment_lock:
-        if not os.path.exists('payments.json'):
-            return False
-
-        with open('payments.json', "r", encoding="utf-8") as f:
-            data = json.load(f)
-
-        return app_trans_id in data
-
-
-def mark_paid(app_trans_id, username, plan, amount):
-    with payment_lock:
-        data = {}
-
-        if os.path.exists("payments.json"):
-            with open("payments.json", "r", encoding="utf-8") as f:
-                data = json.load(f)
-
+        data = load_payments()
         data[app_trans_id] = {
-            "status": "PAID",
+            "status": "PENDING",
             "username": username,
             "plan": plan,
             "amount": amount,
             "provider": "zalopay",
-            "paid_at": datetime.datetime.now().isoformat()
+            "created_at": datetime.datetime.now().isoformat()
         }
+        save_payments(data)
 
-        with open("payments.json", "w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
+
+def mark_paid(app_trans_id):
+    with payment_lock:
+        data = load_payments()
+        if app_trans_id not in data:
+            return False
+        data[app_trans_id]["status"] = "PAID"
+        data[app_trans_id]["paid_at"] = datetime.datetime.now().isoformat()
+        save_payments(data)
+        return True
 
 
 @app.post("/payment/zalopay/create")
-def create_zalopay_payment(
-        username: str = Form(...),
-        plan: str = Form(...)
-):
+def create_zalopay_payment(username: str = Form(...), plan: str = Form(...)):
     if plan not in PLANS:
         raise HTTPException(status_code=400, detail="Invalid plan")
 
-    app_id = int(settings.ZALOPAY_APP_ID)
-    key1 = settings.ZALOPAY_KEY1
-
-    trans_id = int(time.time())
-    app_trans_id = time.strftime("%y%m%d") + "_" + str(trans_id)
-
-    amount = int(PLANS[plan]["amount"])  # ZaloPay KHÔNG nhân 100
-    app_user = username
+    app_trans_id = time.strftime("%y%m%d") + "_" + str(int(time.time()))
+    amount = int(PLANS[plan]["amount"])
 
     embed_data = {
         "redirecturl": settings.ZALOPAY_RETURN_URL
     }
 
     order = {
-        "app_id": app_id,
+        "app_id": int(settings.ZALOPAY_APP_ID),
         "app_trans_id": app_trans_id,
-        "app_user": app_user,
+        "app_user": username,
         "amount": amount,
         "app_time": int(time.time() * 1000),
         "embed_data": json.dumps(embed_data),
-        "item": json.dumps([{
-            "plan": plan,
-            "user": username
-        }]),
-        "description": f"Thanh toan goi {plan} cho nguoi dung {username}",
+        "item": json.dumps([{"plan": plan}]),
+        "description": f"Nang cap goi {plan}",
         "callback_url": settings.ZALOPAY_CALLBACK_URL
     }
 
@@ -633,100 +635,42 @@ def create_zalopay_payment(
         f"{order['embed_data']}|{order['item']}"
     )
 
-    order["mac"] = generate_mac(data, key1)
+    order["mac"] = generate_mac(data, settings.ZALOPAY_KEY1)
 
-    try:
-        response = requests.post(
-            settings.ZALOPAY_CREATE_ORDER_URL,
-            data=order,
-            timeout=10
-        ).json()
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    res = requests.post(
+        settings.ZALOPAY_CREATE_ORDER_URL,
+        data=order,
+        timeout=10
+    ).json()
 
-    if response.get("return_code") != 1:
-        raise HTTPException(status_code=400, detail=response)
+    if res.get("return_code") != 1:
+        raise HTTPException(status_code=400, detail=res)
+
+    create_pending_payment(app_trans_id, username, plan, amount)
 
     return {
-        "order_url": response["order_url"],
+        "order_url": res["order_url"],
         "app_trans_id": app_trans_id
     }
 
 
 @app.post("/payment/zalopay/callback")
-async def zalopay_callback(request: Request):
-    body = await request.json()
-    print("Request: ", body)
-    data = body.get("data")
-    mac = body.get("mac")
-
-    if not data or not mac:
-        return {
-            "return_code": -1,
-            "return_message": "Missing data"
-        }
-
-    # Verify MAC bằng KEY2
-    calc_mac = generate_mac(data, settings.ZALOPAY_KEY2)
-    if mac != calc_mac:
-        return {
-            "return_code": -1,
-            "return_message": "Invalid MAC"
-        }
-
-    payload = json.loads(data)
-
-    if payload.get("status") != 1:
-        return {
-            "return_code": 1,
-            "return_message": "Payment failed"
-        }
-
-    app_trans_id = payload["app_trans_id"]
-    username = payload["app_user"]
-    amount = payload["amount"]
-
-    if is_paid(app_trans_id):
-        return {
-            "return_code": 1,
-            "return_message": "Already processed"
-        }
-
-    plan = None
-    for p, info in PLANS.items():
-        if int(info["amount"]) == int(amount):
-            plan = p
-            break
-
-    if not plan:
-        return {
-            "return_code": -1,
-            "return_message": "Invalid amount"
-        }
-
-    mark_paid(
-        app_trans_id=app_trans_id,
-        username=username,
-        plan=plan,
-        amount=amount
-    )
-
-    # Tăng dung lượng Nextcloud cho user ở đây
-    update_nextcloud_quota(username, plan)
-
-    return {
-        "return_code": 1,
-        "return_message": "success"
-    }
-
-
-@app.get("/payment/zalopay/callback")
-def zalopay_return(
-        status: int = 0,
-        apptransid: str | None = None
+def zalopay_callback(
+        app_trans_id: str = Form(...),
+        status: int = Form(...),
 ):
-    return {
-        "message": "Đang xử lý thanh toán...",
-        "status": status,
-        "app_trans_id": apptransid
-    }
+    if status != 1:
+        return JSONResponse(status_code=400, content={"error": "Payment failed"})
+
+    success = mark_paid(app_trans_id)
+    if not success:
+        return JSONResponse(status_code=400, content={"error": "Transaction not found"})
+    # Load payment info to get username and plan
+    payments = load_payments()
+    payment_info = payments.get(app_trans_id)
+    if not payment_info:
+        return JSONResponse(status_code=400, content={"error": "Payment info not found"})
+
+    update_nextcloud_quota(username=payment_info["username"], plan_name=payment_info["plan"])
+
+    return {"status": "ok"}

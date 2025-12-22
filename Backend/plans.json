@@ -2,15 +2,15 @@
   "plans": {
     "basic": {
       "amount": 50000,
-      "quota": "10GB"
+      "quota": "5GB"
     },
     "pro": {
       "amount": 200000,
-      "quota": "50GB"
+      "quota": "10GB"
     },
     "vip": {
       "amount": 500000,
-      "quota": "200GB"
+      "quota": "20GB"
     }
   }
 }
