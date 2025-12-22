@@ -1,5 +1,6 @@
 from pydantic_settings import BaseSettings
 
+
 class Settings(BaseSettings):
     NEXTCLOUD_URL: str
     NC_USERNAME: str
@@ -16,7 +17,15 @@ class Settings(BaseSettings):
     ENDPOINT: str
     MOMO_RETURN_URL: str
 
+    ZALOPAY_APP_ID: str
+    ZALOPAY_KEY1: str
+    ZALOPAY_KEY2: str
+    ZALOPAY_CREATE_ORDER_URL: str
+    ZALOPAY_RETURN_URL: str
+    ZALOPAY_CALLBACK_URL: str
+
     class Config:
         env_file = ".env"
+
 
 settings = Settings()
